@@ -1,0 +1,202 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Benjamin Collier"
+date: "June 7, 2016"
+output: html_document
+---
+
+
+## Overview
+
+In this project we are using the dataset from http://groupware.les.inf.puc-rio.br/har in which participants were wearing multiple sensors while doing activities and we are trying to predict correct and incorrect outcomes of a factor from A, B, C, D, and E. I tried out multiple models including random forests, Support Vector Machines, Generalized Boosting Models, and Linear Discriminant Analysis. The best method was was random forests, with an accuracy near 1. In the out of sample predictions of 20 data points provided by the instructor, the Random Forests algorithm predicts all 20 correctly.
+
+## Basic Code Setup
+
+Below I clear memory, load libraries, and setup things to run on multi-cores. Some of these algorithsm can take a long time, much faster to run on 8 cores.
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+rm(list = ls(all = TRUE))
+
+library(doParallel); # for parallel processing
+library(caret)
+library(randomForest)
+library(e1071)
+
+#set a seed for reproducibility
+set.seed(325)
+
+#many of the processing we will do takes very long, so I setup some parallel processing to spread this over my 8 threads
+library(parallel)
+nCores <- detectCores(logical = FALSE)
+nThreads <- detectCores(logical = TRUE)
+cat("CPU with",nCores,"cores and",nThreads,"threads detected.\n")
+cl <- makeCluster(nThreads); registerDoParallel(cl) 
+
+setwd("/Users/bcollier/Dropbox/Projects/Projects/Practical Machine Learning/project")
+
+```
+
+## Data Pre-processing
+
+There are a number of NA columns, so we find and remove those first. We then drop unused columns such as username and timestamps. Then I split the data into training and validation sets, with a 60/40 split. Then I take a quick look at the distribution across the five outcome factors.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+#load data sets
+training = read.csv("pml-training.csv", na.strings=c("", "NA", "NULL"))
+testing20 = read.csv("pml-testing.csv", na.strings=c("", "NA", "NULL"))
+
+#remove variables that have all NA's
+training <- training[ , colSums(is.na(training)) == 0]
+testing20 <- testing20[ , colSums(is.na(testing20)) == 0]
+
+#remove non-relevant fields such as usernames and timestamps
+dropColumns <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window")
+training <- training[ , !(names(training) %in% dropColumns)]
+testing20 <- testing20[ , !(names(testing20) %in% dropColumns)]
+
+#we now split these into two sets for cross validation
+inTrain <- createDataPartition(y=training$classe, p=0.60, list=FALSE)
+training  <- training[inTrain,]
+testing  <- training[-inTrain,]
+
+#take a look at the outcome variable
+table(training$classe)
+prop.table(table(training$classe))
+
+dim(training)
+dim(testing)
+
+```
+
+## Running Machine Learning Algorithms
+
+Below we run four algorithms and later compare their accuracy. 
+
+Start with Random Forests
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+ptm <- proc.time()
+mod_rf <- randomForest(classe ~ ., data = training, importance=TRUE)
+proc.time() - ptm
+saveRDS(mod_rf, "mod_rf.Rds")
+
+```
+
+Next we try aGeneralized Boosting Model (GBA)
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+
+ptm <- proc.time()
+mod_gbm <- train(classe ~ ., data = training, method = "gbm") #Generalized Boosting Models
+proc.time() - ptm
+saveRDS(mod_gbm, "mod_gbm.Rds")
+
+```
+
+Here we try linear discriminant analysis (LDA)
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+ptm <- proc.time()
+mod_lda <- train(classe ~ ., data = training, method = "lda") #linear discriminant analysis
+proc.time() - ptm
+saveRDS(mod_lda, "mod_lda.Rds")
+
+```
+
+Lastly, I try using a support vector machine(SVM) model 
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+
+ptm <- proc.time()
+mod_svm <- svm(classe ~ ., data = training) #support vector machines
+proc.time() - ptm
+saveRDS(mod_svm, "mod_svm.Rds")
+
+
+```
+
+## Review algorithm accuracy
+
+Overall random forests provide the best outcome, with accuracy at or near 1 (perfect). GBM performed well with accuracy at .993, and the SVM did well with accuracy at .944. Lastly, LDA did not do very well, overall accuracy at .718
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+predRF <- predict(mod_rf, newdata = testing)
+confusionMatrix(predRF, testing$classe) #accuracy of 1, so perfect
+
+predGBM <- predict(mod_gbm, newdata = testing)
+confusionMatrix(predGBM, testing$classe) #accuracy of .993, very good
+
+predSVM <- predict(mod_svm, newdata = testing) #accuracy of 0.9444, also very good
+confusionMatrix(predSVM, testing$classe)
+
+predLDA <- predict(mod_lda, newdata = testing) #accuracy of 0.718, not so good
+confusionMatrix(predLDA, testing$classe)
+
+```
+
+## Triming Factors Down for Efficiency
+
+Since random forests perform so well, perhaps we can see if we can use fewer than 52 factors to predict. We first graph the most important factors
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+varImp(mod_rf)
+varImpPlot(mod_rf)
+
+```
+
+There is a strong cutoff at about 16 factors, so we will build a model with the top 16 factors
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+# it looks like there is a cutoff around the top 16 or so factors, let's try one final random forest with only 16 factors
+
+trim_columns <- c("classe", "yaw_belt","roll_belt","num_window","pitch_belt","magnet_dumbbell_z","magnet_dumbbell_y","pitch_forearm","accel_dumbbell_y","gyros_dumbbell_z", "roll_arm","magnet_belt_x", "gyros_arm_y", "roll_dumbbell", "magnet_forearm_z", "accel_dumbbell_z", "gyros_belt_z")
+length(trim_columns)
+
+training_trim <- training[ , (names(training) %in% trim_columns)]
+
+mod_rf_trim <- randomForest(classe ~ ., data = training_trim)
+saveRDS(mod_rf_trim, "mod_rf_trim.Rds")
+
+predRF_trim <- predict(mod_rf_trim, newdata = testing)
+confusionMatrix(testing$classe, predRF_trim) #still an accuracy of 1 with only 17 factors
+```
+
+Even with only 16 factors Random Forests do very well, with accuracy at or near 1. Let's try trimming further to the next cutoff in accuracy (using MeanDecreaseAccuracy) to the top 7 factors
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+#there is a large cutoff on the MeanDecreaseAccuracy graph at only 7 factors, lets see what accuracy we get with 7 factors
+trim_columns7 <- c("classe", "yaw_belt","roll_belt","pitch_belt","magnet_dumbbell_z","magnet_dumbbell_y","pitch_forearm", "accel_dumbbell_z")
+length(trim_columns7)
+
+training_trim7 <- training[ , (names(training) %in% trim_columns7)]
+
+mod_rf_trim7 <- randomForest(classe ~ ., data = training_trim7)
+saveRDS(mod_rf_trim7, "mod_rf_trim7.Rds")
+
+predRF_trim7 <- predict(mod_rf_trim7, newdata = testing)
+confusionMatrix(predRF_trim7, testing$classe) #still an accuracy of 1 with only 7 factors
+```
+
+Accuracy is very good, near 1 with only 7 factors.
+
+## Predicting out of sample 20 outcomes
+
+The instructor provided a sample of 20 without an outcome, so we will run our best model (with all 52 factors) to do our best to predict the outcome. Spoiler alert, it does very well, predicting all 20 correctly. I use the column generated below to answer the quiz questions.
+
+```{r echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+coursepred <- predict(mod_rf, newdata=testing20)
+data.frame(problem_id = testing20$problem_id, classe = coursepred)
+
+
+```
+
+## Conclusion
+
+Overall the best model was a random forest model, with very high accuracy near 1. We used this model to predict a sample of 20 outside our data set perfectly. We can still build a great model with only 7 factors rather than using all 52 if efficiency is a concern.
